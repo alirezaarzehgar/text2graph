@@ -18,7 +18,6 @@ import (
 func main() {
 	llmModel := flag.String("model", "llama3-8b-8192", "input data")
 	inputPath := flag.String("i", "", "input data")
-	promptOnly := flag.Bool("promptonly", false, "Just print prompt to use in another LLM models")
 	flag.Parse()
 
 	err := godotenv.Load(".env")
@@ -26,19 +25,33 @@ func main() {
 		log.Fatalf("Unable to load environments: %s", err)
 	}
 
-	prompt, err := generatePrompt(*inputPath)
+	text, err := pdfToText(*inputPath)
 	if err != nil {
 		log.Fatalf("unable to convert pdf file to text: %s", err)
 	}
 
-	if *promptOnly {
-		fmt.Println(prompt)
-		return
-	}
+	apiKey := os.Getenv("API_KEY")
+	chsize := 4000
+	ntext := len(text)
+	nchunks := (ntext / chsize) + 1
 
-	data, err := GorqSendRequest(prompt, os.Getenv("API_KEY"), *llmModel)
-	if err != nil {
-		log.Fatalf("unable to get response from gorq: %s", err)
+	data := ResponseMessage{}
+
+	for i := 0; i < nchunks; i++ {
+		end := (i + 1) * chsize
+		if end > ntext {
+			end = ntext
+		}
+		prompt := PROMPT + text[i*chsize:end]
+
+		d, err := GorqSendRequest(prompt, apiKey, *llmModel)
+		if err != nil {
+			log.Println(err)
+			i--
+			continue
+		}
+
+		data.Data = append(data.Data, d.Data...)
 	}
 
 	err = visualizeData(data)
@@ -47,39 +60,11 @@ func main() {
 	}
 }
 
-func generatePrompt(pdfPath string) (string, error) {
-	prompt := `You are a network graph maker who extracts terms and their relations from a given context.
-You are provided with a context chunk (delimited by ) Your task is to extract the ontology
-of terms mentioned in the given context. These terms should represent the key concepts as per the context.
-Thought 1: While traversing through each sentence, Think about the key terms mentioned in it.
-    Terms may include object, entity, location, organization, person,
-    condition, acronym, documents, service, concept, etc.
-    Terms should be as atomistic as possible
-Thought 2: Think about how these terms can have one on one relation with other terms.
-   Terms that are mentioned in the same sentence or the same paragraph are typically related to each other.
-   Terms can be related to many other terms\n\n"
-Thought 3: Find out the relation between each such related pair of terms.
-Format your output as a list of json. Each element of the list contains a pair of terms
-and the relation between them, like the follwing. don't change following json structure. Edge relation
-should be short:
-{
-	"data": [
-		{
-			"node_1": "A concept from extracted ontology",
-			"node_2": "A related concept from extracted ontology",
-			"edge": "relationship between the two concepts, node_1 and node_2 in less than 5 words"
-		}, {...}\n
-	]
-}
-
-Content:
--------------------------
-`
-
+func pdfToText(pdfPath string) (string, error) {
 	cmd := exec.Command("pdftotext", pdfPath, "-")
 	out, err := cmd.Output()
 
-	return prompt + string(out), err
+	return string(out), err
 }
 
 func GorqSendRequest(content string, token string, model string) (ResponseMessage, error) {
@@ -120,14 +105,10 @@ func GorqSendRequest(content string, token string, model string) (ResponseMessag
 
 	json.Unmarshal(resBytes, &gorqRes)
 
-	if res.StatusCode != http.StatusOK {
-		json.Unmarshal([]byte(gorqRes.Error.FailedGenerated), &resMsg)
-		log.Println(gorqRes.Error.Message)
-		fmt.Println(gorqRes.Error.FailedGenerated)
-		fmt.Print(resMsg)
-
-	} else {
+	if res.StatusCode == http.StatusOK {
 		json.Unmarshal([]byte(gorqRes.Choices[0].Message.Content), &resMsg)
+	} else {
+		return resMsg, fmt.Errorf("unable to get response from this chunk")
 	}
 
 	return resMsg, nil
@@ -147,7 +128,8 @@ func visualizeData(data ResponseMessage) error {
 
 	tmpl := template.New("graph")
 	tmpl.Parse(`digraph G {
-	layout=circo;
+	layout=sfdp;
+	overlap=scale;
 
 	{{ range $node := .Nodes }}
 	"{{ $node }}" [label="{{ $node }}"]
