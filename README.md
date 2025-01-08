@@ -1,3 +1,5 @@
+![preview](preview.png)
+
 # Text to graph
 This project is just a fun practice in LLM for someone without AI knowledge.
 The purpose is extracting information from PDF files.
